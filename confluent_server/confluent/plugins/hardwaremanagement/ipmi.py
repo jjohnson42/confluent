@@ -23,6 +23,9 @@ import eventlet.event
 import eventlet.green.threading as threading
 import eventlet.greenpool as greenpool
 import eventlet.queue as queue
+# Head off import of the webclient so we can patch it without patching
+# pyghmi (though now we may be able to just patch pyghmi after
+eventlet.import_patched('pyghmi.util.webclient')
 import pyghmi.constants as pygconstants
 import pyghmi.exceptions as pygexc
 import pyghmi.ipmi.console as console
