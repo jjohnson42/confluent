@@ -47,7 +47,9 @@ import re
 _macmap = {}
 _macsbyswitch = {}
 _nodesbymac = {}
+_attribbymac = {}
 _switchportmap = {}
+_switchportattribmap = {}
 vintage = None
 
 
@@ -120,6 +122,12 @@ def _nodelookup(switch, ifname):
     for portdesc in _switchportmap.get(switch, {}):
         if _namesmatch(ifname, portdesc):
             return _switchportmap[switch][portdesc]
+    return None
+
+def _attriblookup(switch, ifname):
+    for portdesc in _switchportmap.get(switch, {}):
+        if _namesmatch(ifname, portdesc):
+            return _switchportattribmap[switch][portdesc]
     return None
 
 
@@ -249,6 +257,7 @@ def _map_switch_backend(args):
                 _nodesbymac[mac] = None
             else:
                 _nodesbymac[mac] = nodename
+                _attribbymac[mac] = _attriblookup(switch, ifname)
 
 
 def find_node_by_mac(mac, configmanager):
@@ -331,6 +340,8 @@ def _full_updatemacmap(configmanager):
                         continue
                     if curswitch not in _switchportmap:
                         _switchportmap[curswitch] = {}
+                    if curswitch not in _switchportattribmap:
+                        _switchportattribmap[curswitch] = {}
                     if portname in _switchportmap[curswitch]:
                         log.log({'error': 'Duplicate switch topology config '
                                           'for {0} and {1}'.format(
@@ -338,8 +349,10 @@ def _full_updatemacmap(configmanager):
                                             _switchportmap[curswitch][
                                                 portname])})
                         _switchportmap[curswitch][portname] = None
+                        _switchportattribmap[curswitch][portname] = None
                     else:
                         _switchportmap[curswitch][portname] = node
+                        _switchportattribmap[curswitch][portname] = attr[:-7]
         switchcfg = configmanager.get_node_attributes(
             switches, ('secret.hardwaremanagementuser', 'secret.snmpcommunity',
                        'secret.hardwaremanagementpassword'), decrypt=True)
