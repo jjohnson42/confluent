@@ -465,7 +465,7 @@ def print_attrib_path(path, session, requestargs, options, rename=None, attrpref
                             if isinstance(val, list):
                                 val = ','.join(val)
                             attrout = '{0}: {1}: {2}'.format(
-                                node, printattr, val)
+                                node, printattr, val).strip()
                         else:
                             attrout = '{0}: {1}:'.format(node, printattr)
                     elif 'isset' in currattr:

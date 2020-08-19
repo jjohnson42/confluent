@@ -1,4 +1,4 @@
-7# vim: tabstop=4 shiftwidth=4 softtabstop=4
+# vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright 2014 IBM Corporation
 # Copyright 2015-2019 Lenovo
@@ -52,6 +52,7 @@ except ModuleNotFoundError:
     import dbm
 import ast
 import base64
+from binascii import hexlify
 import confluent.config.attributes as allattributes
 import confluent.config.conf as conf
 import confluent.log
@@ -60,6 +61,7 @@ import confluent.util
 import confluent.netutil as netutil
 import confluent.exceptions as exc
 import copy
+import crypt
 try:
     import cPickle
 except ModuleNotFoundError:
@@ -70,6 +72,7 @@ import eventlet.event as event
 import eventlet.green.select as select
 import eventlet.green.threading as gthread
 import fnmatch
+import hashlib
 import json
 import msgpack
 import operator
@@ -111,6 +114,14 @@ _attraliases = {
     'switchpass': 'secret.hardwaremanagementpassword',
 }
 _validroles = ('Administrator', 'Operator', 'Monitor')
+
+
+def attrib_supports_expression(attrib):
+    attrib = _attraliases.get(attrib, attrib)
+    if attrib.startswith('secret.') or attrib.startswith('crypted.'):
+        return False
+    return True
+
 
 def _mkpath(pathname):
     try:
@@ -195,11 +206,11 @@ def _rpc_del_usergroup(tenant, name):
 
 
 def _rpc_master_set_usergroup(tenant, name, attributemap):
-    ConfigManager(tenant).set_user(name, attributemap)
+    ConfigManager(tenant).set_usergroup(name, attributemap)
 
 
 def _rpc_set_usergroup(tenant, name, attributemap):
-    ConfigManager(tenant)._true_set_user(name, attributemap)
+    ConfigManager(tenant)._true_set_usergroup(name, attributemap)
 
 
 def _rpc_master_set_user(tenant, name, attributemap):
@@ -475,6 +486,30 @@ def _get_valid_attrname(attrname):
     return attrname
 
 
+def grub_hashcrypt_value(value):
+    salt = os.urandom(64)
+    algo = 'sha512'
+    rounds = 10000
+    if not isinstance(value, bytes):
+        value = value.encode('utf8')
+    crypted = hexlify(hashlib.pbkdf2_hmac(algo, value, salt, rounds))
+    crypted = crypted.upper()
+    salt = hexlify(salt).upper()
+    if not isinstance(salt, str):
+        salt = salt.decode('utf8')
+    if not isinstance(crypted, str):
+        crypted = crypted.decode('utf8')
+    ret = 'grub.pbkdf2.{0}.{1}.{2}.{3}'.format(algo, rounds, salt, crypted)
+    return ret
+
+
+def hashcrypt_value(value):
+    salt = confluent.util.stringify(base64.b64encode(os.urandom(12),
+                                    altchars=b'./'))
+    salt = '$6${0}'.format(salt)
+    return crypt.crypt(value, salt)
+
+
 def crypt_value(value,
                 key=None,
                 integritykey=None):
@@ -488,7 +523,8 @@ def crypt_value(value,
         key = _masterkey
     iv = os.urandom(12)
     crypter = AES.new(key, AES.MODE_GCM, nonce=iv)
-    value = confluent.util.stringify(value).encode('utf-8')
+    if not isinstance(value, bytes):
+        value = value.encode('utf-8')
     cryptval, hmac = crypter.encrypt_and_digest(value)
     return iv, cryptval, hmac, b'\x02'
 
@@ -616,6 +652,7 @@ def relay_slaved_requests(name, listener):
                     except ValueError as ve:
                         exc = ['ValueError', str(ve)]
                     except Exception as e:
+                        logException()
                         exc = ['Exception', str(e)]
                     if 'xid' in rpc:
                         res = _push_rpc(listener, msgpack.packb({'xid': rpc['xid'],
@@ -733,6 +770,14 @@ def clear_configuration():
 def commit_clear():
     global _oldtxcount
     global _oldcfgstore
+    # first, copy over old non-key globals, as those are
+    # currently defined as local to each collective member
+    # currently just 'autosense' which is intended to be active
+    # per collective member
+    for globvar in _oldcfgstore['globals']:
+        if globvar.endswith('_key'):
+            continue
+        _cfgstore['globals'][globvar] = _oldcfgstore['globals'][globvar]
     _oldcfgstore = None
     _oldtxcount = 0
     with _synclock:
@@ -1378,6 +1423,14 @@ class ConfigManager(object):
         groupname = confluent.util.stringify(groupname)
         if groupname in self._cfgstore['usergroups']:
             raise Exception("Duplicate groupname requested")
+        for candrole in _validroles:
+            if candrole.lower().startswith(role.lower()):
+                role = candrole
+                break
+        if role not in _validroles:
+            raise ValueError(
+                'Unrecognized role "{0}" (valid roles: {1})'.format(
+                    role, ','.join(_validroles)))
         self._cfgstore['usergroups'][groupname] = {'role': role}
         _mark_dirtykey('usergroups', groupname, self.tenant)
         self._bg_sync_to_file()
@@ -1480,7 +1533,15 @@ class ConfigManager(object):
         name = confluent.util.stringify(name)
         if name in self._cfgstore['users']:
             raise Exception("Duplicate username requested")
-        self._cfgstore['users'][name] = {'id': uid}
+        for candrole in _validroles:
+            if candrole.lower().startswith(role.lower()):
+                role = candrole
+                break
+        if role not in _validroles:
+            raise ValueError(
+                'Unrecognized role "{0}" (valid roles: {1})'.format(
+                    role, ','.join(_validroles)))
+        self._cfgstore['users'][name] = {'id': uid, 'role': role}
         if displayname is not None:
             self._cfgstore['users'][name]['displayname'] = displayname
         _cfgstore['main']['idmap'][uid] = {
@@ -1584,7 +1645,7 @@ class ConfigManager(object):
             nodecfg = self._cfgstore['nodes'][node]
         except KeyError:  # node did not exist, nothing to do
             return
-        for attrib in nodecfg.keys():
+        for attrib in list(nodecfg.keys()):
             if attrib.startswith("_"):
                 continue
             if attrib == 'groups':
@@ -1667,6 +1728,20 @@ class ConfigManager(object):
         self.set_group_attributes(attribmap, autocreate=True)
 
     def set_group_attributes(self, attribmap, autocreate=False):
+        for group in attribmap:
+            curr = attribmap[group]
+            for attrib in curr:
+                if attrib.startswith('crypted.'):
+                    if not isinstance(curr[attrib], dict):
+                        curr[attrib] = {'value': curr[attrib]}
+                    if 'hashvalue' not in curr[attrib]:
+                        curr[attrib]['hashvalue'] = hashcrypt_value(
+                            curr[attrib]['value'])
+                        if 'grubhashvalue' not in curr[attrib]:
+                            curr[attrib]['grubhashvalue'] = grub_hashcrypt_value(
+                                curr[attrib]['value'])
+                    if 'value' in curr[attrib]:
+                        del curr[attrib]['value']
         if cfgleader:  # currently config slave to another
             return exec_on_leader('_rpc_master_set_group_attributes',
                                   self.tenant, attribmap, autocreate)
@@ -1759,6 +1834,9 @@ class ConfigManager(object):
                     newdict = attribmap[group][attr]
                 if 'value' in newdict and attr.startswith("secret."):
                     newdict['cryptvalue'] = crypt_value(newdict['value'])
+                    del newdict['value']
+                if 'value' in newdict and attr.startswith("crypted."):
+                    newdict['hashvalue'] = hashcrypt_value(newdict['value'])
                     del newdict['value']
                 cfgobj[attr] = newdict
                 if attr == 'nodes':
@@ -2072,6 +2150,20 @@ class ConfigManager(object):
 
 
     def set_node_attributes(self, attribmap, autocreate=False):
+        for node in attribmap:
+            curr = attribmap[node]
+            for attrib in curr:
+                if attrib.startswith('crypted.'):
+                    if not isinstance(curr[attrib], dict):
+                        curr[attrib] = {'value': curr[attrib]}
+                    if 'hashvalue' not in curr[attrib]:
+                        curr[attrib]['hashvalue'] = hashcrypt_value(
+                            curr[attrib]['value'])
+                        if 'grubhashvalue' not in curr[attrib]:
+                            curr[attrib]['grubhashvalue'] = grub_hashcrypt_value(
+                                curr[attrib]['value'])
+                    if 'value' in curr[attrib]:
+                        del curr[attrib]['value']
         if cfgleader:  # currently config slave to another
             return exec_on_leader('_rpc_master_set_node_attributes',
                                         self.tenant, attribmap, autocreate)
@@ -2144,7 +2236,7 @@ class ConfigManager(object):
                             attrname, node)
                         raise ValueError(errstr)
                     attribmap[node][attrname] = attrval
-        for node in attribmap:            
+        for node in attribmap:
             node = confluent.util.stringify(node)
             exprmgr = None
             if node not in self._cfgstore['nodes']:
@@ -2161,6 +2253,11 @@ class ConfigManager(object):
                     newdict = attribmap[node][attrname]
                 if 'value' in newdict and attrname.startswith("secret."):
                     newdict['cryptvalue'] = crypt_value(newdict['value'])
+                    del newdict['value']
+                if 'value' in newdict and attrname.startswith("crypted."):
+                    newdict['hashvalue'] = hashcrypt_value(newdict['value'])
+                    newdict['grubhashvalue'] = grub_hashcrypt_value(
+                        newdict['value'])
                     del newdict['value']
                 cfgobj[attrname] = newdict
                 if attrname == 'groups':
@@ -2577,6 +2674,7 @@ def restore_db_from_directory(location, password):
     with open(os.path.join(location, 'main.json'), 'r') as cfgfile:
         cfgdata = cfgfile.read()
         ConfigManager(tenant=None)._load_from_json(cfgdata)
+    ConfigManager.wait_for_sync(True)
 
 
 def dump_db_to_directory(location, password, redact=None, skipkeys=False):

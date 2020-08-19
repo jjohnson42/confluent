@@ -97,6 +97,35 @@ node = {
         'description': ('Classification of node as server or switch'),
         'validvalues': ('switch', 'server'),
     },
+    'crypted.rootpassword': {
+        'description': 'The password of the local root password. '
+                       'This is stored as a non-recoverable hash. If '
+                       'unspecified and confluent is used to deploy, then '
+                       'login at console using password will be impossible '
+                       'and only key based login can work for root.',
+    },
+    'crypted.grubpassword': {
+        'description': 'Password required to modify grub behavior at boot',
+    },
+    'crypted.selfapikey': {
+        'description': ('Crypt of api key for self api requests by node'),
+    },
+    'deployment.encryptboot': {
+        'description': ('Specify a strategy for encrypting the volume. Support '
+                        'This setting is currently only enabled for '
+                        'RedHat 8 and CentOS 8 profiles. If blank or unset, '
+                        'no encryption is done. If set to "tpm2" then the OS '
+                        'will freely decrypt so long as the same '
+                        'Trusted Platform Module is available to decrypt the '
+                        'volume'),
+        'validvalues': ('tpm2', 'none', ''),
+    },
+    'deployment.apiarmed': {
+        'description': ('Indicates whether the node authentication token interface '
+                        'is armed.  If set to once, it will grant only the next '
+                        'request. If set to continuous, will allow many requests.'
+                        'Should not be set unless an OS deployment is pending.'),
+    },
     #'id': {
     #    'description': ('Numeric identifier for node')
     #},
@@ -156,6 +185,36 @@ node = {
                         'modified automatically if another attribute '
                         'indicates candidate managers, either for '
                         'high availability or load balancing purposes.')
+    },
+    'deployment.pendingprofile': {
+        'description': ('An OS profile that is pending deployment.  This indicates to '
+                        'the network boot subsystem what should be offered when a potential '
+                        'network boot request comes in')
+    },
+    'deployment.stagedprofile': {
+        'description': ('A profile that has been staged, but is awaiting final '
+                        'boot to be activated. This allows an OS profile to '
+                        'remove itself from netboot without indicating '
+                        'completion to any watcher.')
+    },
+    'deployment.profile': {
+        'description': ('The profile that has most recently reported '
+                        'completion of deployment. Note that an image may opt '
+                        'to leave itself both current and pending, for example '
+                        'a stateless profile would be both after first boot.')
+
+    },
+    'deployment.useinsecureprotocols': {
+        'description': ('What phase(s) of boot are permitted to use insecure protocols '
+                        '(TFTP and HTTP without TLS.  By default, HTTPS is allowed.  However '
+                        'this is not compatible with most firmware in most scenarios.  Using '
+                        '"firmware" as the setting will still use HTTPS after the initial download, '
+                        'though be aware that a successful compromise during the firmware phase '
+                        'will negate future TLS protections.  The value "always" will result in '
+                        'tftp/http being used for entire deployment.  Note that ONIE does not '
+                        'support secure protocols, and in that case this setting must be "always" '
+                        'or "firmware"'),
+        'validlist': ('always', 'firmware', 'never'),
     },
     'discovery.passwordrules': {
         'description':  'Any specified rules shall be configured on the BMC '
@@ -304,6 +363,18 @@ node = {
                        'control, get sensor data, get inventory, and so on. '
                        'ipmi is used if not specified.'
     },
+    'hardwaremanagement.port': {
+        'description': 'The port the BMC should be configured to connect to '
+                       'network.  This only has effect during deployment and '
+                       'does not apply to out of band discovery. Example values '
+                       'include "ocp", "ml2", "lom" (for on board port '
+                       'shared with operating system), or "dedicated"',
+    },
+    'hardwaremanagement.vlan': {
+        'description': 'The vlan that a BMC should be configured to tag '
+                       'traffic. This only has effect during OS deployment '
+                       'and does not apply to out of band discovery.',
+    },
     'enclosure.bay': {
          'description': 'The bay in the enclosure, if any',
 #        'appliesto': ['system'],
@@ -347,6 +418,21 @@ node = {
         'description': 'Whether or not the indicated network interface is to be used for booting.  This is used by '
                        'the discovery process to decide where to place the mac address of a detected PXE nic.',
     },
+    'net.ipv4_address': {
+        'description': 'When configuring static, use this address.  If '
+                       'unspecified, it will check if the node name resolves '
+                       'to an IP address.  Additionally, the subnet prefix '
+                       'may be specified with a suffix, e.g. "/16".  If not '
+                       'specified, it will attempt to autodetect based on '
+                       'current network configuration.'
+    },
+    'net.ipv4_method': {
+        'description': 'Whether to use static or dhcp when configuring this '
+                       'interface for IPv4. "firmwaredhcp" means to defer to '
+                       'external DHCP server during firmware execution, but '
+                       'use static for OS',
+        'validvalues': ('dhcp', 'static', 'firmwaredhcp', 'none')
+    },
     'net.ipv4_gateway': {
         'description':  'The IPv4 gateway to use if applicable.  As is the '
                         'case for other net attributes, net.eth0.ipv4_gateway '
@@ -355,6 +441,10 @@ node = {
     'net.hwaddr': {
         'description': 'The hardware address, aka MAC address of the interface indicated, generally populated by the '
                        'PXE discovery mechanism'
+    },
+    'net.hostname': {
+        'description': 'Used to specify hostnames per interface. Can be a '
+                       'comma delimited list to indicate aliases'
     },
     # 'net.pxe': { 'description': 'Whether pxe will be used on this interface'
     # TODO(jjohnson2):  Above being 'true' will control whether mac addresses
@@ -373,6 +463,12 @@ node = {
         'description': 'The port on the switch that corresponds to this node. '
                        'See information on net.switch for more on the '
                        'flexibility of net.* attributes.'
+    },
+    'ntp.servers': {
+        'description': 'NTP server or servers to provide to node during '
+                       'deployment. An OS profile may default to internet NTP, '
+                       'depending on default configuration of the respective '
+                       'operating system',
     },
 #    'id.modelnumber': {
 #        'description': 'The manufacturer dictated  model number for the node',
@@ -440,5 +536,11 @@ node = {
     'pubkeys.ssh': {
         'description': ('Fingerprint of the SSH key of the OS running on the '
                         'system.'),
+    },
+    'dns.domain': {
+        'description': 'DNS Domain searched by default by the system'
+    },
+    'dns.servers': {
+        'description': 'DNS Server or servers to provide to node',
     },
 }

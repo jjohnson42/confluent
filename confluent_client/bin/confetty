@@ -292,6 +292,8 @@ def rcompleter(text, state):
 
 
 def parse_command(command):
+    if isinstance(command, list):
+        return command
     try:
         args = shlex.split(command, posix=True)
     except ValueError as ve:
@@ -912,8 +914,7 @@ def main():
         do_command("start /nodes/%s/console/session" % session_node, netserver)
         doexit = True
     elif shellargs:
-        command = " ".join(shellargs)
-        do_command(command, netserver)
+        do_command(shellargs, netserver)
         quitconfetty(fullexit=True, fixterm=False)
 
     powerstate = None
@@ -957,7 +958,13 @@ def main():
                             # don't bother churning if minute does not change
                             laststate['showtime'] = now
                             updatestatus()
-                        sys.stdout.flush()
+                        try:
+                            sys.stdout.flush()
+                        except Exception:
+                            # EWOULDBLOCK causes this to raise, ignore
+                            # this scenario comfortable that it
+                            # will come out soon enough
+                            pass
                     else:
                         deadline = 5
                         connected = False

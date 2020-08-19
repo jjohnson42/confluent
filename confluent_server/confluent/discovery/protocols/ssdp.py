@@ -28,15 +28,20 @@
 # NTS: ssdp:alive
 
 
+import confluent.config.configmanager as cfm
 import confluent.neighutil as neighutil
 import confluent.util as util
+import confluent.log as log
+import confluent.netutil as netutil
 import eventlet.green.select as select
 import eventlet.green.socket as socket
+import time
 try:
     from eventlet.green.urllib.request import urlopen
 except (ImportError, AssertionError):
     from eventlet.green.urllib2 import urlopen
 import struct
+import traceback
 
 mcastv4addr = '239.255.255.250'
 mcastv6addr = 'ff02::c'
@@ -69,7 +74,7 @@ def scan(services, target=None):
             yield rply
 
 
-def snoop(handler, byehandler=None):
+def snoop(handler, byehandler=None, protocol=None, uuidlookup=None):
     """Watch for SSDP notify messages
 
     The handler shall be called on any service coming online.
@@ -85,6 +90,7 @@ def snoop(handler, byehandler=None):
     # Normally, I like using v6/v4 agnostic socket. However, since we are
     # dabbling in multicast wizardry here, such sockets can cause big problems,
     # so we will have two distinct sockets
+    tracelog = log.Logger('trace')
     known_peers = set([])
     net6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
     net6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
@@ -108,50 +114,103 @@ def snoop(handler, byehandler=None):
     net6.bind(('', 1900))
     peerbymacaddress = {}
     while True:
-        newmacs = set([])
-        machandlers = {}
-        r, _, _ = select.select((net4, net6), (), (), 60)
-        neighutil.update_neigh()
-        while r:
-            for s in r:
-                (rsp, peer) = s.recvfrom(9000)
-                rsp = rsp.split('\r\n')
-                method, _, _ = rsp[0].split(' ', 2)
-                if method == 'NOTIFY':
-                    ip = peer[0].partition('%')[0]
-                    if ip not in neighutil.neightable:
+        try:
+            newmacs = set([])
+            machandlers = {}
+            r, _, _ = select.select((net4, net6), (), (), 60)
+            neighutil.update_neigh()
+            while r:
+                for s in r:
+                    (rsp, peer) = s.recvfrom(9000)
+                    if rsp[:4] == b'PING':
                         continue
-                    if peer in known_peers:
-                        continue
-                    mac = neighutil.neightable[ip]
-                    known_peers.add(peer)
-                    newmacs.add(mac)
-                    if mac in peerbymacaddress:
-                        peerbymacaddress[mac]['addresses'].append(peer)
-                    else:
-                        peerbymacaddress[mac] = {
-                            'hwaddr': mac,
-                            'addresses': [peer],
-                        }
-                        peerdata = peerbymacaddress[mac]
+                    rsp = rsp.split(b'\r\n')
+                    method, _, _ = rsp[0].split(b' ', 2)
+                    if method == b'NOTIFY':
+                        ip = peer[0].partition('%')[0]
+                        if ip not in neighutil.neightable:
+                            continue
+                        if peer in known_peers:
+                            continue
+                        mac = neighutil.neightable[ip]
+                        known_peers.add(peer)
+                        newmacs.add(mac)
+                        if mac in peerbymacaddress:
+                            peerbymacaddress[mac]['addresses'].append(peer)
+                        else:
+                            peerbymacaddress[mac] = {
+                                'hwaddr': mac,
+                                'addresses': [peer],
+                            }
+                            peerdata = peerbymacaddress[mac]
+                            for headline in rsp[1:]:
+                                if not headline:
+                                    continue
+                                headline = util.stringify(headline)
+                                header, _, value = headline.partition(':')
+                                header = header.strip()
+                                value = value.strip()
+                                if header == 'NT':
+                                    peerdata['service'] = value
+                                elif header == 'NTS':
+                                    if value == 'ssdp:byebye':
+                                        machandlers[mac] = byehandler
+                                    elif value == 'ssdp:alive':
+                                        machandlers[mac] = None # handler
+                    elif method == b'M-SEARCH':
+                        if not uuidlookup:
+                            continue
+                        #ip = peer[0].partition('%')[0]
                         for headline in rsp[1:]:
                             if not headline:
                                 continue
-                            header, _, value = headline.partition(':')
-                            header = header.strip()
-                            value = value.strip()
-                            if header == 'NT':
-                                peerdata['service'] = value
-                            elif header == 'NTS':
-                                if value == 'ssdp:byebye':
-                                    machandlers[mac] = byehandler
-                                elif value == 'ssdp:alive':
-                                    machandlers[mac] = handler
-            r, _, _ = select.select((net4, net6), (), (), 0.1)
-        for mac in newmacs:
-            thehandler = machandlers.get(mac, None)
-            if thehandler:
-                thehandler(peerbymacaddress[mac])
+                            headline = util.stringify(headline)
+                            headline = headline.partition(':')
+                            if len(headline) < 3:
+                                continue
+                            if  headline[0] == 'ST' and headline[-1].startswith(' urn:xcat.org:service:confluent:'):
+                                try:
+                                    cfm.check_quorum()
+                                except Exception:
+                                    continue
+                                for query in headline[-1].split('/'):
+                                    if query.startswith('uuid='):
+                                        curruuid = query.split('=', 1)[1].lower()
+                                        node = uuidlookup(curruuid)
+                                        if not node:
+                                            break
+                                        # Do not bother replying to a node that
+                                        # we have no deployment activity
+                                        # planned for
+                                        cfg = cfm.ConfigManager(None)
+                                        cfd = cfg.get_node_attributes(
+                                            node, 'deployment.pendingprofile')
+                                        if not cfd.get(node, {}).get(
+                                                'deployment.pendingprofile', {}).get('value', None):
+                                            break
+                                        currtime = time.time()
+                                        seconds = int(currtime)
+                                        msecs = int(currtime * 1000 % 1000)
+                                        reply = 'HTTP/1.1 200 OK\r\nNODENAME: {0}\r\nCURRTIME: {1}\r\nCURRMSECS: {2}\r\n'.format(node, seconds, msecs)
+                                        if '%' in peer[0]:
+                                            iface = peer[0].split('%', 1)[1]
+                                            reply += 'MGTIFACE: {0}\r\n'.format(
+                                                peer[0].split('%', 1)[1])
+                                            ncfg = netutil.get_nic_config(
+                                                cfg, node, ifidx=iface)
+                                            if ncfg.get('matchesnodename', None):
+                                                reply += 'DEFAULTNET: 1\r\n'
+                                        if not isinstance(reply, bytes):
+                                            reply = reply.encode('utf8')
+                                        s.sendto(reply, peer)
+                r, _, _ = select.select((net4, net6), (), (), 0.2)
+            for mac in newmacs:
+                thehandler = machandlers.get(mac, None)
+                if thehandler:
+                    thehandler(peerbymacaddress[mac])
+        except Exception:
+                tracelog.log(traceback.format_exc(), ltype=log.DataTypes.event,
+                             event=log.Events.stacktrace)
 
 
 def _find_service(service, target):
@@ -163,18 +222,26 @@ def _find_service(service, target):
         for addr in addrs:
             host = addr[4][0]
             if addr[0] == socket.AF_INET:
-                net4.sendto(smsg.format(host, service), addr[4])
+                msg = smsg.format(host, service)
+                if not isinstance(msg, bytes):
+                    msg = msg.encode('utf8')
+                net4.sendto(msg, addr[4])
             elif addr[0] == socket.AF_INET6:
                 host = '[{0}]'.format(host)
-                net6.sendto(smsg.format(host, service), addr[4])
+                msg = smsg.format(host, service)
+                if not isinstance(msg, bytes):
+                    msg = msg.encode('utf8')               
+                net6.sendto(msg, addr[4])
     else:
         net4.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         for idx in util.list_interface_indexes():
             net6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF,
                             idx)
             try:
-                net6.sendto(smsg.format('[{0}]'.format(mcastv6addr), service
-                                        ), (mcastv6addr, 1900, 0, 0))
+                msg = smsg.format('[{0}]'.format(mcastv6addr), service)
+                if not isinstance(msg, bytes):
+                    msg = msg.encode('utf8')
+                net6.sendto(msg, (mcastv6addr, 1900, 0, 0))
             except socket.error:
                 # ignore interfaces without ipv6 multicast causing error
                 pass
@@ -185,9 +252,14 @@ def _find_service(service, target):
             bcast = i4['broadcast']
             net4.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
                             socket.inet_aton(addr))
-            net4.sendto(smsg.format(mcastv4addr, service),
-                        (mcastv4addr, 1900))
-            net4.sendto(smsg.format(bcast, service), (bcast, 1900))
+            msg = smsg.format(mcastv4addr, service)
+            if not isinstance(msg, bytes):
+                msg = msg.encode('utf8')
+            net4.sendto(msg, (mcastv4addr, 1900))
+            msg = smsg.format(bcast, service)
+            if not isinstance(msg, bytes):
+                msg = msg.encode('utf8')
+            net4.sendto(msg, (bcast, 1900))
     # SSDP by spec encourages responses to spread out over a 3 second interval
     # hence we must be a bit more patient
     deadline = util.monotonic_time() + 4
@@ -206,7 +278,7 @@ def _find_service(service, target):
         for url in peerdata[nid].get('urls', ()):
             if url.endswith('/desc.tmpl'):
                 info = urlopen(url).read()
-                if '<friendlyName>Athena</friendlyName>' in info:
+                if b'<friendlyName>Athena</friendlyName>' in info:
                     peerdata[nid]['services'] = ['service:thinkagile-storage']
                     yield peerdata[nid]
 
@@ -218,12 +290,12 @@ def _parse_ssdp(peer, rsp, peerdata):
     if ip in neighutil.neightable:
         nid = neighutil.neightable[ip]
         mac = nid
-    headlines = rsp.split('\r\n')
+    headlines = rsp.split(b'\r\n')
     try:
-        _, code, _ = headlines[0].split(' ', 2)
+        _, code, _ = headlines[0].split(b' ', 2)
     except ValueError:
         return
-    if code == '200':
+    if code == b'200':
         if nid in peerdata:
             peerdatum = peerdata[nid]
             if peer not in peerdatum['addresses']:
@@ -237,7 +309,7 @@ def _parse_ssdp(peer, rsp, peerdata):
         for headline in headlines[1:]:
             if not headline:
                 continue
-            header, _, value = headline.partition(':')
+            header, _, value = headline.partition(b':')
             header = header.strip()
             value = value.strip()
             if header == 'AL' or header == 'LOCATION':

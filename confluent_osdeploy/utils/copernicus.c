@@ -27,7 +27,7 @@ int add_uuid(char* destination, int maxsize) {
     return  uuidsize + 6;
 }
 
-int add_macs(char* destination, int maxsize) {
+void add_macs(char* destination, int maxsize) {
     struct ifaddrs *ifc, *ifa;
     struct sockaddr_ll *lla;
     int offset;
@@ -48,8 +48,7 @@ int add_macs(char* destination, int maxsize) {
         } else if (lla->sll_hatype == ARPHRD_ETHER) {
             snprintf(macaddr, 32, "/mac=%02x:%02x:%02x:%02x:%02x:%02x",
                 lla->sll_addr[0], lla->sll_addr[1], lla->sll_addr[2],
-                lla->sll_addr[3], lla->sll_addr[4], lla->sll_addr[5],
-                lla->sll_addr[6]
+                lla->sll_addr[3], lla->sll_addr[4], lla->sll_addr[5]
             );
         } else {
             continue;
@@ -65,13 +64,21 @@ int main(int argc, char* argv[]) {
     struct sockaddr_in6 *in6;
     struct sockaddr_in *in, *bin;
     int ns, n4;
+    unsigned int lastidx = 2147483648;
     struct sockaddr_in6 addr, dst;
     struct sockaddr_in addr4, dst4;
     char msg[1024];
+    char *nodenameidx;
+    char nodename[1024];
+    char lastnodename[1024];
     char lastmsg[1024];
-    int ifidx, offset;
+    char last6msg[1024];
+    char mgtifname[1024];
+    int ifidx, offset, isdefault;
     fd_set rfds;
     struct timeval tv;
+    int settime = 0;
+    int setusec = 500000;
     socklen_t dstsize, dst4size;
     dstsize = sizeof(dst);
     dst4size = sizeof(dst4);
@@ -80,6 +87,10 @@ int main(int argc, char* argv[]) {
     memset(&addr, 0, sizeof(addr));
     memset(&dst, 0, sizeof(dst));
     memset(&dst4, 0, sizeof(dst4));
+    memset(nodename, 0, 1024);
+    memset(lastnodename, 0, 1024);
+    memset(lastmsg, 0, 1024);
+    memset(last6msg, 0, 1024);
     addr.sin6_family = AF_INET6;
     addr.sin6_addr = in6addr_any;
     addr.sin6_port = htons(190);
@@ -94,10 +105,6 @@ int main(int argc, char* argv[]) {
     inet_pton(AF_INET, "239.255.255.250", &dst4.sin_addr);
     strncpy(msg,  "M-SEARCH * HTTP/1.1\r\nST: urn:xcat.org:service:confluent:", 1024);
     offset = strnlen(msg, 1024);
-    if (argc > 1) {
-        snprintf(msg + offset, 1024 - offset, "/node=%s", argv[1]);
-        offset = strnlen(msg, 1024);
-    }
     add_uuid(msg + offset, 1024 - offset);
     offset = strnlen(msg, 1024);
     add_macs(msg + offset, 1024 - offset);
@@ -114,7 +121,7 @@ int main(int argc, char* argv[]) {
     for (ifc = ifa; ifc != NULL; ifc = ifc->ifa_next) {
         if (!ifc->ifa_addr) continue;
         if (ifc->ifa_flags & IFF_LOOPBACK) continue;
-        if (ifc->ifa_flags & IFF_MULTICAST != IFF_MULTICAST) continue;
+        if ((ifc->ifa_flags & IFF_MULTICAST) != IFF_MULTICAST) continue;
         if (ifc->ifa_addr->sa_family == AF_INET6) {
             in6 = (struct sockaddr_in6 *)ifc->ifa_addr;
             if (in6->sin6_scope_id == 0)
@@ -134,29 +141,117 @@ int main(int argc, char* argv[]) {
     FD_ZERO(&rfds);
     FD_SET(n4, &rfds);
     FD_SET(ns, &rfds);
-    tv.tv_sec = 10;
-    tv.tv_usec = 0;
+    tv.tv_sec = 2;
+    tv.tv_usec = 500000;
     ifidx = select(FD_SETSIZE, &rfds, NULL, NULL, &tv);
     while (ifidx) {
         if (ifidx == -1) perror("Unable to select");
         if (ifidx) {
+            mgtifname[0] = 0;
+            isdefault = 0;
             if (FD_ISSET(n4, &rfds)) {
-                recvfrom(n4, msg, 1024, 0, (struct sockaddr *)&dst4, &dst4size);
+                memset(msg, 0, 1024);
+                /* Deny packet access to the last 24 bytes to assure null */
+                recvfrom(n4, msg, 1000, 0, (struct sockaddr *)&dst4, &dst4size);
+                if  (nodenameidx = strstr(msg, "NODENAME: ")) {
+                        nodenameidx += 10;
+                        strncpy(nodename, nodenameidx, 1024);
+                        nodenameidx = strstr(nodename, "\r");
+                        if (nodenameidx) { nodenameidx[0] = 0; }
+                        if (strncmp(lastnodename, nodename, 1024) != 0) {
+                            printf("NODENAME: %s\n", nodename);
+                            strncpy(lastnodename, nodename, 1024);
+                        }
+                }
+                if (nodenameidx = strstr(msg, "CURRTIME: ")) {
+                    nodenameidx += 10;
+                    strncpy(nodename, nodenameidx, 1024);
+                    if (nodenameidx = strstr(nodename, "\r")) {
+                        nodenameidx[0] = 0;
+                    }
+                    settime = strtol(nodename, NULL, 10);
+                }
+                if (nodenameidx = strstr(msg, "CURRMSECS: ")) {
+                    nodenameidx += 10;
+                    strncpy(nodename, nodenameidx, 1024);
+                    if (nodenameidx = strstr(nodename, "\r")) {
+                        nodenameidx[0] = 0;
+                    }
+                    setusec = strtol(nodename, NULL, 10) * 1000;
+                }
+                memset(msg, 0, 1024);
                 inet_ntop(dst4.sin_family, &dst4.sin_addr, msg, dst4size);
                 /* Take measure from printing out the same ip twice in a row */
                 if (strncmp(lastmsg, msg, 1024) != 0) {
-                    printf("%s\n", msg);
+                    sendto(n4, "PING", 4, 0, (const struct sockaddr *)&dst4, dst4size);
+                    printf("MANAGER: %s\n", msg);
                     strncpy(lastmsg, msg, 1024);
                 }
             }
             if (FD_ISSET(ns, &rfds)) {
-                recvfrom(ns, msg, 1024, 0, (struct sockaddr *)&dst, &dstsize);
+                memset(msg, 0, 1024);
+                /* Deny packet access to the last 24 bytes to assure null */
+                recvfrom(ns, msg, 1000, 0, (struct sockaddr *)&dst, &dstsize);
+                if  (nodenameidx = strstr(msg, "NODENAME: ")) {
+                        nodenameidx += 10;
+                        strncpy(nodename, nodenameidx, 1024);
+                        nodenameidx = strstr(nodename, "\r");
+                        if (nodenameidx) { nodenameidx[0] = 0; }
+                        if (strncmp(lastnodename, nodename, 1024) != 0) {
+                            printf("NODENAME: %s\n", nodename);
+                            strncpy(lastnodename, nodename, 1024);
+                        }
+                }
+                if (nodenameidx = strstr(msg, "CURRTIME: ")) {
+                    nodenameidx += 10;
+                    strncpy(nodename, nodenameidx, 1024);
+                    if (nodenameidx = strstr(nodename, "\r")) {
+                        nodenameidx[0] = 0;
+                    }
+                    settime = strtol(nodename, NULL, 10);
+                }
+                if (nodenameidx = strstr(msg, "DEFAULTNET: 1")) {
+                    isdefault = 1;
+                }
+                if (nodenameidx = strstr(msg, "MGTIFACE: ")) {
+                    nodenameidx += 10;
+                    strncpy(mgtifname, nodenameidx, 1024);
+                    if (nodenameidx = strstr(mgtifname, "\r")) {
+                        nodenameidx[0] = 0;
+                    }
+                }
+                if (nodenameidx = strstr(msg, "CURRMSECS: ")) {
+                    nodenameidx += 10;
+                    strncpy(nodename, nodenameidx, 1024);
+                    if (nodenameidx = strstr(nodename, "\r")) {
+                        nodenameidx[0] = 0;
+                    }
+                    setusec = strtol(nodename, NULL, 10) * 1000;
+                }
+                memset(msg, 0, 1024);
                 inet_ntop(dst.sin6_family, &dst.sin6_addr, msg, dstsize);
-                if (strncmp(lastmsg, msg, 1024) != 0) {
-                    printf("%s\n", msg);
-                    strncpy(lastmsg, msg, 1024);
+                if (strncmp(last6msg, msg, 1024) != 0 || lastidx != dst.sin6_scope_id) {
+		    lastidx = dst.sin6_scope_id;
+                    sendto(ns, "PING", 4, 0, (const struct sockaddr *)&dst, dstsize);
+                    printf("MANAGER: %s", msg);
+                    if (strncmp(msg, "fe80::", 6) == 0) {
+                        printf("%%%u", dst.sin6_scope_id);
+                    }
+                    printf("\n");
+                    printf("EXTMGRINFO: %s", msg);
+                    if (strncmp(msg, "fe80::", 6) == 0) {
+                        printf("%%%u", dst.sin6_scope_id);
+                    }
+                    printf("|%s|%d\n", mgtifname, isdefault);
+                    strncpy(last6msg, msg, 1024);
                 }
             }
+        }
+        if (settime && argc > 1 && strcmp(argv[1], "-t") == 0) {
+            tv.tv_sec = settime;
+            tv.tv_usec = setusec;
+            settimeofday(&tv, NULL);
+            settime = 0;
         }
         tv.tv_sec = 0;
         tv.tv_usec = 500000;

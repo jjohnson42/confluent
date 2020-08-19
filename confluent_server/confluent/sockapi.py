@@ -37,6 +37,7 @@ import eventlet.green.ssl as ssl
 import eventlet
 
 import confluent.auth as auth
+import confluent.credserver as credserver
 import confluent.tlvdata as tlvdata
 import confluent.consoleserver as consoleserver
 import confluent.config.configmanager as configmanager
@@ -352,9 +353,13 @@ def _tlshandler(bind_host, bind_port):
     # Enable TCP_FASTOPEN
     plainsocket.setsockopt(socket.SOL_TCP, 23, 5)
     plainsocket.listen(5)
+    cs = credserver.CredServer()
     while (1):  # TODO: exithook
         cnn, addr = plainsocket.accept()
-        eventlet.spawn_n(_tlsstartup, cnn)
+        if addr[1] < 1000:
+            eventlet.spawn_n(cs.handle_client, cnn, addr)
+        else:
+            eventlet.spawn_n(_tlsstartup, cnn)
 
 
 if ffi:
@@ -473,9 +478,10 @@ class SockApi(object):
     def watch_for_cert(self):
         libc = ctypes.CDLL(ctypes.util.find_library('c'))
         watcher = libc.inotify_init()
-        if libc.inotify_add_watch(watcher, '/etc/confluent/', 0x100) > -1:
+        if libc.inotify_add_watch(watcher, b'/etc/confluent/', 0x100) > -1:
             while True:
                 select.select((watcher,), (), (), 86400)
+                os.read(watcher, 1024)
                 if self.should_run_remoteapi():
                     os.close(watcher)
                     self.start_remoteapi()

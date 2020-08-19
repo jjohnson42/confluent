@@ -108,10 +108,10 @@ def pytechars2line(chars, maxlen=None):
         char = chars[charidx]
         csi = bytearray([])
         if char.fg != lfg:
-            csi.append(30 + pytecolors2ansi[char.fg])
+            csi.append(30 + pytecolors2ansi.get(char.fg, 9))
             lfg = char.fg
         if char.bg != lbg:
-            csi.append(40 + pytecolors2ansi[char.bg])
+            csi.append(40 + pytecolors2ansi.get(char.bg, 9))
             lbg = char.bg
         if char.bold != lb:
             lb = char.bold
@@ -243,7 +243,7 @@ class ConsoleHandler(object):
     def check_collective(self, attrvalue):
         myc = attrvalue.get(self.node, {}).get('collective.manager', {}).get(
             'value', None)
-        if configmodule.list_collective() and not myc:
+        if list(configmodule.list_collective()) and not myc:
             self._is_local = False
             self._detach()
             self._disconnect()
@@ -419,7 +419,7 @@ class ConsoleHandler(object):
             if not self.reconnect:
                 self.reconnect = eventlet.spawn_after(retrytime, self._connect)
             return
-        except exc.TargetEndpointUnreachable:
+        except (exc.TargetEndpointUnreachable, socket.gaierror) as se:
             self.clearbuffer()
             self.error = 'unreachable'
             self.connectstate = 'unconnected'

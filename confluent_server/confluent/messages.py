@@ -674,6 +674,8 @@ class InputAttributes(ConfluentMessage):
         if nodes is None:
             self.attribs = inputdata
             for attrib in self.attribs:
+                if not cfm.attrib_supports_expression(attrib):
+                    continue
                 if type(self.attribs[attrib]) in (bytes, unicode):
                     try:
                         # ok, try to use format against the string
@@ -700,7 +702,7 @@ class InputAttributes(ConfluentMessage):
             return {}
         nodeattr = deepcopy(self.nodeattribs[node])
         for attr in nodeattr:
-            if type(nodeattr[attr]) in (bytes, unicode):
+            if type(nodeattr[attr]) in (bytes, unicode) and cfm.attrib_supports_expression(attr):
                 try:
                     # as above, use format() to see if string follows
                     # expression, store value back in case of escapes
@@ -1144,6 +1146,7 @@ class BootDevice(ConfluentChoiceMessage):
         'setup',
         'default',
         'cd',
+        'floppy',
     ])
 
     valid_bootmodes = set([
@@ -1798,8 +1801,12 @@ class CryptedAttributes(Attributes):
         nkv = {}
         for key in kv:
             nkv[key] = {'isset': False}
+            if kv[key] and 'hashvalue' in kv[key]:
+                targkey = 'hashvalue'
+            else:
+                targkey = 'cryptvalue'
             try:
-                if kv[key] is not None and kv[key]['cryptvalue'] != '':
+                if kv[key] is not None and kv[key][targkey] != '':
                     nkv[key] = {'isset': True}
                     nkv[key]['inheritedfrom'] = kv[key]['inheritedfrom']
             except KeyError:

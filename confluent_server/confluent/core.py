@@ -46,6 +46,7 @@ import confluent.exceptions as exc
 import confluent.messages as msg
 import confluent.networking.macmap as macmap
 import confluent.noderange as noderange
+import confluent.osimage as osimage
 try:
     import confluent.shellmodule as shellmodule
 except ImportError:
@@ -69,6 +70,10 @@ import sys
 pluginmap = {}
 dispatch_plugins = (b'ipmi', u'ipmi', b'redfish', u'redfish', b'tsmsol', u'tsmsol')
 
+try:
+    unicode
+except NameError:
+    unicode = str
 
 def seek_element(currplace, currkey):
     try:
@@ -125,8 +130,9 @@ def load_plugins():
         sys.path.pop(1)
 
 
-rootcollections = ['discovery/', 'events/', 'networking/',
-                   'noderange/', 'nodes/', 'nodegroups/', 'usergroups/' , 'users/', 'version']
+rootcollections = ['deployment/', 'discovery/', 'events/', 'networking/',
+                   'noderange/', 'nodes/', 'nodegroups/', 'usergroups/' ,
+                   'users/', 'version']
 
 
 class PluginRoute(object):
@@ -137,6 +143,58 @@ class PluginRoute(object):
 class PluginCollection(object):
     def __init__(self, routedict):
         self.routeinfo = routedict
+
+
+def handle_deployment(configmanager, inputdata, pathcomponents,
+                      operation):
+    if len(pathcomponents) == 1:
+        yield msg.ChildCollection('distributions/')
+        yield msg.ChildCollection('profiles/')
+        yield msg.ChildCollection('importing/')
+        return
+    if pathcomponents[1] == 'distributions':
+        if len(pathcomponents) == 2 and operation == 'retrieve':
+            for dist in osimage.list_distros():
+                yield msg.ChildCollection(dist + '/')
+            return
+        if len(pathcomponents) == 3:
+            distname = pathcomponents[-1]
+            if 'operation' == 'update':
+                if inputdata.get('rescan', False):
+                    osimage.rescan_dist(distname)
+    if pathcomponents[1] == 'profiles':
+        if len(pathcomponents) == 2 and operation == 'retrieve':
+            for prof in osimage.list_profiles():
+                yield msg.ChildCollection(prof + '/')
+            return
+        if len(pathcomponents) == 3:
+            profname = pathcomponents[-1]
+            if operation == 'update' and 'updateboot' in inputdata:
+                osimage.update_boot(profname)
+                yield msg.KeyValueData({'updated': profname})
+                return
+    if pathcomponents[1] == 'importing':
+        if len(pathcomponents) == 2 or not pathcomponents[-1]:
+            if operation == 'retrieve':
+                for imp in osimage.list_importing():
+                    yield imp
+                return
+            elif operation == 'create':
+                importer = osimage.MediaImporter(inputdata['filename'])
+                yield msg.KeyValueData({'target': importer.targpath,
+                                        'name': importer.importkey})
+                return
+        elif len(pathcomponents) == 3:
+            if operation == 'retrieve':
+                for res in osimage.get_importing_status(pathcomponents[-1]):
+                    yield res
+                return
+            elif operation == 'delete':
+                for res in osimage.remove_importing(pathcomponents[-1]):
+                    yield res
+                return
+    raise exc.NotFoundException('Unrecognized request')
+
 
 def _init_core():
     global noderesources
@@ -1060,10 +1118,6 @@ def handle_discovery(pathcomponents, operation, configmanager, inputdata):
     if pathcomponents[0] == 'detected':
         pass
 
-def handle_discovery(pathcomponents, operation, configmanager, inputdata):
-    if pathcomponents[0] == 'detected':
-        pass
-
 def handle_path(path, operation, configmanager, inputdata=None, autostrip=True):
     """Given a full path request, return an object.
 
@@ -1080,6 +1134,9 @@ def handle_path(path, operation, configmanager, inputdata=None, autostrip=True):
     elif pathcomponents[0] == 'noderange':
         return handle_node_request(configmanager, inputdata, operation,
                                    pathcomponents, autostrip)
+    elif pathcomponents[0] == 'deployment':
+        return handle_deployment(configmanager, inputdata, pathcomponents,
+                                 operation)
     elif pathcomponents[0] == 'nodegroups':
         return handle_nodegroup_request(configmanager, inputdata,
                                         pathcomponents,

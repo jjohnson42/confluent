@@ -704,11 +704,11 @@ def detected(info):
     if nodename and handler:
         eval_node(cfg, handler, info, nodename)
     elif handler:
-        log.log(
-            {'info': 'Detected unknown {0} with hwaddr {1} at '
-                     'address {2}'.format(
-                        handler.devname, info['hwaddr'], handler.ipaddr
-                      )})
+        #log.log(
+        #    {'info': 'Detected unknown {0} with hwaddr {1} at '
+        #             'address {2}'.format(
+        #                handler.devname, info['hwaddr'], handler.ipaddr
+        #              )})
         info['discostatus'] = 'unidentified'
         unknown_info[info['hwaddr']] = info
 
@@ -877,6 +877,8 @@ def get_nodename_from_chained_smms(cfg, handler, info):
                 nodename = newnodename
     return nodename
 
+def get_node_by_uuid(uuid):
+    return nodes_by_uuid.get(uuid, None)
 
 def get_nodename_from_enclosures(cfg, info):
     nodename = None
@@ -1076,7 +1078,7 @@ def discover_node(cfg, handler, info, nodename, manual):
                 traceback.print_exc()
                 return False
             newnodeattribs = {}
-            if cfm.list_collective():
+            if list(cfm.list_collective()):
                 # We are in a collective, check collective.manager
                 cmc = cfg.get_node_attributes(nodename, 'collective.manager')
                 cm = cmc.get(nodename, {}).get('collective.manager', {}).get('value', None)
@@ -1140,8 +1142,8 @@ def do_pxe_discovery(cfg, handler, info, manual, nodename, policies):
         return True
     if uuid_is_valid(info['uuid']):
         known_pxe_uuids[info['uuid']] = nodename
-    log.log({'info': 'Detected {0} ({1} with mac {2})'.format(
-        nodename, handler.devname, info['hwaddr'])})
+    #log.log({'info': 'Detected {0} ({1} with mac {2})'.format(
+    #    nodename, handler.devname, info['hwaddr'])})
     return True
 
 
@@ -1246,8 +1248,7 @@ def start_detection():
     if rechecker is None:
         rechecktime = util.monotonic_time() + 900
         rechecker = eventlet.spawn_after(900, _periodic_recheck, cfg)
-
-    # eventlet.spawn_n(ssdp.snoop, safe_detected)
+    eventlet.spawn_n(ssdp.snoop, None, None, ssdp, get_node_by_uuid)
 
 def stop_autosense():
     for watcher in list(autosensors):

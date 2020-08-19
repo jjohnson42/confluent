@@ -30,6 +30,7 @@ import confluent.log as log
 import confluent.messages
 import confluent.core as pluginapi
 import confluent.asynchttp
+import confluent.selfservice as selfservice
 import confluent.shellserver as shellserver
 import confluent.tlvdata
 import confluent.util as util
@@ -411,12 +412,16 @@ def resourcehandler_backend(env, start_response):
                ('X-Permitted-Cross-Domain-Policies', 'none')]
     reqbody = None
     reqtype = None
+    if env.get('PATH_INFO', '').startswith('/self/'):
+        for res in selfservice.handle_request(env, start_response):
+            yield res
+        return
     if 'CONTENT_LENGTH' in env and int(env['CONTENT_LENGTH']) > 0:
         reqbody = env['wsgi.input'].read(int(env['CONTENT_LENGTH']))
         reqtype = env['CONTENT_TYPE']
     operation = opmap[env['REQUEST_METHOD']]
     querydict = _get_query_dict(env, reqbody, reqtype)
-    if 'restexplorerop' in querydict:
+    if operation != 'retrieve' and 'restexplorerop' in querydict:
         operation = querydict['restexplorerop']
         del querydict['restexplorerop']
     authorized = _authorize_request(env, operation)
@@ -472,7 +477,7 @@ def resourcehandler_backend(env, start_response):
             'hardwaremanagement.manager', {}).get('value', None)
         if not targip:
             start_response('404 Not Found', headers)
-            yield 'No hardwaremanagemnet.manager defined for node'
+            yield 'No hardwaremanagement.manager defined for node'
             return
         funport = forwarder.get_port(targip, env['HTTP_X_FORWARDED_FOR'],
                                      authorized['sessionid'])
